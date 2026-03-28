@@ -242,10 +242,42 @@ function createServer(): Server {
     try {
       const { method: _, params = {}, ...rest } = args as any;
       const callParams = { ...params, ...rest };
-      const result =
-        Object.keys(callParams).length > 0
-          ? await fn.call(moduleObj, callParams)
-          : await fn.call(moduleObj);
+
+      // Parse the function signature to get parameter names (excluding 'config')
+      const fnSrc = fn.toString();
+      const sigMatch = fnSrc.match(/async\s+\w+\(([^)]*)\)/);
+      const paramNames = sigMatch
+        ? sigMatch[1].split(",").map((p: string) => p.trim()).filter((p: string) => p && p !== "config")
+        : [];
+
+      // Map user params to positional arguments based on the function signature
+      // e.g. pingSet(data, config) → [callParams.data || callParams]
+      // e.g. pingStart(jobid, data, config) → [callParams.jobid, callParams.data || {}]
+      // e.g. aliasGetItem(uuid, config) → [callParams.uuid]
+      let result: any;
+      if (paramNames.length === 0) {
+        // No params expected (e.g. activityGetActivity(config))
+        result = await fn.call(moduleObj);
+      } else if (paramNames.length === 1 && paramNames[0] === "data") {
+        // Single 'data' param — pass the whole callParams as data if no explicit 'data' key
+        const data = callParams.data !== undefined ? callParams.data : callParams;
+        result = await fn.call(moduleObj, data);
+      } else {
+        // Multiple params — map each by name, treating the last 'data' param specially
+        const positionalArgs = paramNames.map((name: string, i: number) => {
+          if (callParams[name] !== undefined) return callParams[name];
+          // If this is the last param named 'data' and not explicitly provided,
+          // pass remaining callParams (minus other named params) as the data
+          if (name === "data" && i === paramNames.length - 1) {
+            const remaining = { ...callParams };
+            paramNames.forEach((n: string) => { if (n !== "data") delete remaining[n]; });
+            return Object.keys(remaining).length > 0 ? remaining : undefined;
+          }
+          return undefined;
+        });
+        result = await fn.call(moduleObj, ...positionalArgs);
+      }
+
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
