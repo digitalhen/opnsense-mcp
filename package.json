@@ -1,0 +1,23 @@
+{
+  "name": "opnsense-mcp",
+  "version": "1.0.0",
+  "description": "Hosted OPNsense MCP server for Claude.ai with HTTP transport and bearer token auth",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@richard-stovall/opnsense-typescript-client": "0.5.3",
+    "express": "^4.21.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.3.3"
+  }
+}
