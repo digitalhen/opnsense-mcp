@@ -257,8 +257,47 @@ export function discoverTools(): ToolDef[] {
 }
 
 // ---------------------------------------------------------------------------
+// Startup health probe — test one no-param method per module to detect
+// SDK/OPNsense version mismatches (e.g. firmware module returns 404 on all)
+// ---------------------------------------------------------------------------
+
+export async function probeTools(tools: ToolDef[]): Promise<ToolDef[]> {
+  const healthy: ToolDef[] = [];
+
+  for (const tool of tools) {
+    // Find a no-param method to probe with
+    const probe = [...tool.methods.values()].find((m) => m.paramCount === 0);
+    if (!probe) {
+      // No no-param methods to test — keep the tool
+      healthy.push(tool);
+      continue;
+    }
+
+    const moduleObj = getModuleObject(tool);
+    const fn = moduleObj[probe.name];
+    try {
+      await fn.call(moduleObj);
+      healthy.push(tool);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        log.warn(`Disabling ${tool.name} — probe method '${probe.name}' returned 404 (SDK/OPNsense version mismatch)`);
+      } else {
+        // Non-404 errors are OK — the module exists, just this call might have issues
+        healthy.push(tool);
+      }
+    }
+  }
+
+  return healthy;
+}
+
+// ---------------------------------------------------------------------------
 // Retry with exponential backoff
 // ---------------------------------------------------------------------------
+
+// Max response size to return to the LLM (characters). Larger responses get truncated.
+const MAX_RESPONSE_CHARS = 80_000;
 
 function isTransient(err: any): boolean {
   if (!err) return false;
@@ -271,6 +310,12 @@ function isTransient(err: any): boolean {
   const status = err?.response?.status;
   if (status && (status >= 500 || status === 429)) return true;
   return false;
+}
+
+function truncateResponse(text: string): string {
+  if (text.length <= MAX_RESPONSE_CHARS) return text;
+  const truncated = text.substring(0, MAX_RESPONSE_CHARS);
+  return `${truncated}\n\n... (response truncated from ${text.length} to ${MAX_RESPONSE_CHARS} characters. Use more specific query params to narrow results.)`;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, label: string, maxRetries = 2): Promise<T> {
@@ -359,6 +404,14 @@ export async function executeMethod(
     }, label);
 
     log.info(`${label} succeeded`);
+
+    // Truncate large responses to avoid overwhelming the LLM context
+    const json = JSON.stringify(result, null, 2);
+    if (json.length > MAX_RESPONSE_CHARS) {
+      log.warn(`${label} response truncated: ${json.length} chars`);
+      return { result: truncateResponse(json) };
+    }
+
     return { result };
   } catch (err: any) {
     const status = err?.response?.status;

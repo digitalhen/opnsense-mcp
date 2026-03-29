@@ -14,7 +14,7 @@ import express from "express";
 import crypto from "crypto";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { initClient, discoverTools, executeMethod, type ToolDef } from "./tools.js";
+import { initClient, discoverTools, probeTools, executeMethod, type ToolDef } from "./tools.js";
 import { createOAuthRouter, isValidToken } from "./oauth.js";
 
 const log = createLogger("server");
@@ -26,8 +26,14 @@ const log = createLogger("server");
 const config = loadConfig();
 initClient(config);
 
-const TOOLS = discoverTools();
-log.info(`Discovered ${TOOLS.length} tools, ${TOOLS.reduce((n, t) => n + t.methods.size, 0)} total methods`);
+const discovered = discoverTools();
+log.info(`Discovered ${discovered.length} tools, ${discovered.reduce((n, t) => n + t.methods.size, 0)} total methods`);
+
+// Probe each module to detect SDK/OPNsense version mismatches
+const TOOLS = await probeTools(discovered);
+if (TOOLS.length < discovered.length) {
+  log.info(`After probing: ${TOOLS.length} healthy tools (${discovered.length - TOOLS.length} disabled due to 404)`);
+}
 
 // Build a lookup map for fast tool resolution
 const toolMap = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));
