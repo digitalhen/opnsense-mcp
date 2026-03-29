@@ -4,13 +4,15 @@
 
 import { Router } from "express";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import type { Config } from "./config.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("oauth");
 
 // ---------------------------------------------------------------------------
-// In-memory stores
+// Persistent stores — backed by a JSON file on disk
 // ---------------------------------------------------------------------------
 
 interface AuthCode {
@@ -33,19 +35,65 @@ interface RegisteredClient {
   redirectUris: string[];
 }
 
+interface StoreData {
+  accessTokens: Record<string, TokenRecord>;
+  registeredClients: Record<string, RegisteredClient>;
+  // Auth codes are short-lived (10 min) — no need to persist
+}
+
 const authCodes = new Map<string, AuthCode>();
 const accessTokens = new Map<string, TokenRecord>();
 const registeredClients = new Map<string, RegisteredClient>();
 
-// Periodic cleanup of expired tokens and codes
+// File path for persistence (next to .env in the project root)
+let storePath = "";
+
+function initStore(dataDir: string) {
+  storePath = path.join(dataDir, "oauth-store.json");
+  try {
+    if (fs.existsSync(storePath)) {
+      const raw: StoreData = JSON.parse(fs.readFileSync(storePath, "utf8"));
+      const now = Date.now();
+      // Restore tokens, filtering out expired ones
+      for (const [k, v] of Object.entries(raw.accessTokens || {})) {
+        if (v.expiresAt > now) accessTokens.set(k, v);
+      }
+      for (const [k, v] of Object.entries(raw.registeredClients || {})) {
+        registeredClients.set(k, v);
+      }
+      log.info(`Restored ${accessTokens.size} tokens and ${registeredClients.size} clients from disk`);
+    }
+  } catch (err: any) {
+    log.warn(`Failed to load OAuth store: ${err.message}`);
+  }
+}
+
+function saveStore() {
+  try {
+    const data: StoreData = {
+      accessTokens: Object.fromEntries(accessTokens),
+      registeredClients: Object.fromEntries(registeredClients),
+    };
+    fs.writeFileSync(storePath, JSON.stringify(data, null, 2), "utf8");
+  } catch (err: any) {
+    log.error(`Failed to save OAuth store: ${err.message}`);
+  }
+}
+
+// Periodic cleanup of expired tokens and codes + persist to disk
 setInterval(() => {
   const now = Date.now();
+  let changed = false;
   for (const [code, data] of authCodes) {
     if (data.expiresAt < now) authCodes.delete(code);
   }
   for (const [token, data] of accessTokens) {
-    if (data.expiresAt < now) accessTokens.delete(token);
+    if (data.expiresAt < now) {
+      accessTokens.delete(token);
+      changed = true;
+    }
   }
+  if (changed) saveStore();
 }, 60_000);
 
 // ---------------------------------------------------------------------------
@@ -79,7 +127,8 @@ function esc(str: unknown): string {
 // Routes
 // ---------------------------------------------------------------------------
 
-export function createOAuthRouter(config: Config): Router {
+export function createOAuthRouter(config: Config, dataDir?: string): Router {
+  initStore(dataDir || process.cwd());
   const router = Router();
 
   // RFC 8414 metadata
@@ -106,6 +155,7 @@ export function createOAuthRouter(config: Config): Router {
       clientSecret,
       redirectUris: redirect_uris || [],
     });
+    saveStore();
     log.info(`Registered OAuth client: ${client_name || clientId}`);
     res.status(201).json({
       client_id: clientId,
@@ -221,6 +271,7 @@ export function createOAuthRouter(config: Config): Router {
     });
     authCodes.delete(code);
 
+    saveStore();
     log.info(`Issued access token for client ${stored.clientId}`);
 
     res.json({
